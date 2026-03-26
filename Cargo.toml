@@ -1,0 +1,6 @@
+[workspace]
+members = [
+  "HW1/simulator",
+]
+
+resolver = "2"
