@@ -5,7 +5,7 @@
 use crate::ir::*;
 
 pub fn emit(schedule: &Schedule) -> Vec<Vec<String>> {
-    schedule
+    let mut out: Vec<Vec<String>> = schedule
         .flat()
         .map(|bundle| {
             ExecUnit::ALL
@@ -16,7 +16,17 @@ pub fn emit(schedule: &Schedule) -> Vec<Vec<String>> {
                 })
                 .collect()
         })
-        .collect()
+        .collect();
+
+    // Trim any trailing fully-empty bundles to match reference format.
+    while out
+        .last()
+        .is_some_and(|b| b.iter().all(|s| s == " nop" || s == "nop"))
+    {
+        out.pop();
+    }
+
+    out
 }
 
 fn format_instruction(i: &Instruction) -> String {
@@ -75,5 +85,11 @@ fn format_instruction(i: &Instruction) -> String {
         MovLC => format!("mov LC, {}", i.imm.unwrap()),
         MovEC => format!("mov EC, {}", i.imm.unwrap()),
     };
-    format!("{pred}{body}")
+    // The reference JSON formats unpredicated slots with a leading space.
+    if pred.is_empty() {
+        format!(" {body}")
+    } else {
+        format!("{pred}{body}")
+    }
 }
+

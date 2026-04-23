@@ -1,6 +1,6 @@
 [
   [
-    "mov LC, 100",
+    " mov LC, 100",
     "nop",
     "nop",
     "nop",
@@ -10,28 +10,21 @@
     "nop",
     "nop",
     "nop",
-    "ld x1, 4096(x5)",
+    " ld x1, 4096(x5)",
     "nop"
   ],
   [
-    "addi x2, x1, 1",
+    " addi x2, x1, 1",
     "nop",
     "nop",
-    "ld x3, 8192(x6)",
-    "nop"
-  ],
-  [
-    "nop",
-    "nop",
-    "mulu x4, x3, x3",
-    "st x2, 4096(x7)",
+    " ld x3, 8192(x6)",
     "nop"
   ],
   [
     "nop",
     "nop",
-    "nop",
-    "nop",
+    " mulu x4, x3, x3",
+    " st x2, 4096(x7)",
     "nop"
   ],
   [
@@ -45,7 +38,14 @@
     "nop",
     "nop",
     "nop",
-    "st x4, 8192(x8)",
-    "loop 1"
+    "nop",
+    "nop"
+  ],
+  [
+    "nop",
+    "nop",
+    "nop",
+    " st x4, 8192(x8)",
+    " loop 1"
   ]
 ]

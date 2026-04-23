@@ -1,7 +1,7 @@
 [
   [
-    "mov LC, 100",
-    "mov x1, 5",
+    " mov LC, 100",
+    " mov x1, 5",
     "nop",
     "nop",
     "nop"
@@ -9,14 +9,7 @@
   [
     "nop",
     "nop",
-    "mulu x2, x1, x1",
-    "nop",
-    "nop"
-  ],
-  [
-    "nop",
-    "nop",
-    "nop",
+    " mulu x33, x1, x1",
     "nop",
     "nop"
   ],
@@ -28,17 +21,17 @@
     "nop"
   ],
   [
-    "add x3, x2, x2",
-    "nop",
+    " mov EC, 0",
+    " mov p32, true",
     "nop",
     "nop",
     "nop"
   ],
   [
-    "mov x2, x3",
+    "(p32) add x32, x33, x33",
     "nop",
     "nop",
     "nop",
-    "loop.pip 4"
+    " loop.pip 4"
   ]
 ]

@@ -83,6 +83,183 @@ pub fn allocate(
     deps: &DepTable,
     placement: &HashMap<InstId, Placement>,
 ) {
-    // FIXME(student): replace this body with rotating-register allocation.
-    alloc_b::allocate(schedule, program, deps, placement);
+    // No loop.pip kernel: fall back to simple allocation so no-loop tests pass.
+    if schedule.bb1.is_empty() || schedule.ii == 0 {
+        alloc_b::allocate(schedule, program, deps, placement);
+        return;
+    }
+
+    let ii = schedule.ii as i64;
+    let bb1_start = schedule.bb0.len() as i64;
+    let bb1_len = schedule.bb1.len() as i64;
+    let stages = ((schedule.bb1.len() as i64) + ii - 1) / ii;
+    let stride = stages + 1;
+
+    // stage number for BB1 instructions (based on absolute bundle index).
+    let stage_of = |id: InstId| -> i64 {
+        let b = placement[&id].bundle as i64;
+        (b - bb1_start) / ii
+    };
+
+    // ---- Phase 1: rotating regs for BB1 producers ----
+    let mut rot_base: HashMap<InstId, i64> = HashMap::new();
+    let mut k: i64 = 0;
+    for rel in 0..schedule.bb1.len() {
+        for unit in ExecUnit::ALL {
+            if let Some(instr) = schedule.bb1[rel].get(unit) {
+                if instr.dest_reg.is_some() {
+                    rot_base.insert(instr.id, 32 + k * stride);
+                    k += 1;
+                }
+            }
+        }
+    }
+    for rel in 0..schedule.bb1.len() {
+        for unit in ExecUnit::ALL {
+            if let Some(instr) = schedule.bb1[rel].get_mut(unit) {
+                if let Some(&rb) = rot_base.get(&instr.id) {
+                    instr.dest_reg = Some(rb as u8);
+                }
+            }
+        }
+    }
+
+    // ---- Phase 2: non-rotating regs for loop invariants ----
+    let mut inv_reg: HashMap<InstId, u8> = HashMap::new();
+    let mut next_nonrot: u8 = 1;
+    for rel in 0..schedule.bb1.len() {
+        for unit in ExecUnit::ALL {
+            let Some(instr) = schedule.bb1[rel].get(unit) else { continue };
+            if instr.id >= deps.len() { continue; }
+            let id = instr.id;
+            for dep in &deps[id].src_deps {
+                if let Some(DepKind::LoopInvariant(p)) = dep {
+                    inv_reg.entry(*p).or_insert_with(|| {
+                        let r = next_nonrot;
+                        next_nonrot += 1;
+                        r
+                    });
+                }
+            }
+        }
+    }
+
+    // ---- Phase 4 prework: BB0 producers that feed interloop deps ----
+    let mut bb0_interloop_reg: HashMap<InstId, u8> = HashMap::new();
+    for inst_deps in deps {
+        for dep in &inst_deps.src_deps {
+            if let Some(DepKind::Interloop { bb0: Some(p0), bb1: p1 }) = dep {
+                if let Some(&rb) = rot_base.get(p1) {
+                    let st_p = stage_of(*p1);
+                    let r = rb + (1 - st_p);
+                    if r >= 0 && r <= 255 {
+                        bb0_interloop_reg.insert(*p0, r as u8);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Phase 4: assign remaining producer dest regs in BB0/BB2 ----
+    let mut other_reg: HashMap<InstId, u8> = HashMap::new();
+    for bidx in 0..schedule.total_bundles() {
+        for unit in ExecUnit::ALL {
+            let bundle = schedule.bundle_mut(bidx);
+            let Some(instr) = bundle.get_mut(unit) else { continue };
+            if instr.dest_reg.is_none() { continue; }
+
+            if rot_base.contains_key(&instr.id) {
+                continue; // BB1 already handled
+            }
+            if let Some(&r) = inv_reg.get(&instr.id) {
+                instr.dest_reg = Some(r);
+                continue;
+            }
+            if let Some(&r) = bb0_interloop_reg.get(&instr.id) {
+                instr.dest_reg = Some(r);
+                continue;
+            }
+            let r = other_reg.entry(instr.id).or_insert_with(|| {
+                let rr = next_nonrot;
+                next_nonrot += 1;
+                rr
+            });
+            instr.dest_reg = Some(*r);
+        }
+    }
+
+    // Helper to fetch a producer's assigned register (non-offset form).
+    let producer_reg = |pid: InstId| -> Option<u8> {
+        if let Some(&r) = inv_reg.get(&pid) {
+            return Some(r);
+        }
+        if let Some(&r) = bb0_interloop_reg.get(&pid) {
+            return Some(r);
+        }
+        if let Some(&r) = other_reg.get(&pid) {
+            return Some(r);
+        }
+        if let Some(&rb) = rot_base.get(&pid) {
+            return Some(rb as u8);
+        }
+        None
+    };
+
+    // ---- Phase 3: rewrite source operands (incl. rotating offsets) ----
+    for bidx in 0..schedule.total_bundles() {
+        for unit in ExecUnit::ALL {
+            let bundle = schedule.bundle_mut(bidx);
+            let Some(instr) = bundle.get_mut(unit) else { continue };
+            if instr.id >= deps.len() { continue; }
+            let cid = instr.id;
+
+            let c_in_bb1 = (placement[&cid].bundle as i64) >= bb1_start
+                && (placement[&cid].bundle as i64) < (bb1_start + bb1_len);
+            let st_c = if c_in_bb1 { stage_of(cid) } else { 0 };
+
+            for (op_i, dep) in deps[cid].src_deps.iter().enumerate() {
+                if op_i >= instr.src_regs.len() {
+                    continue;
+                }
+                match dep {
+                    Some(DepKind::Local(p)) if c_in_bb1 && rot_base.contains_key(p) => {
+                        let st_p = stage_of(*p);
+                        let rb = rot_base[p];
+                        instr.src_regs[op_i] = (rb + (st_c - st_p)) as u8;
+                    }
+                    Some(DepKind::Interloop { bb1: p, .. }) if c_in_bb1 && rot_base.contains_key(p) => {
+                        let st_p = stage_of(*p);
+                        let rb = rot_base[p];
+                        instr.src_regs[op_i] = (rb + (st_c - st_p) + 1) as u8;
+                    }
+                    Some(DepKind::LoopInvariant(p)) => {
+                        if let Some(&r) = inv_reg.get(p) {
+                            instr.src_regs[op_i] = r;
+                        }
+                    }
+                    Some(DepKind::PostLoop(p)) => {
+                        if let Some(&rb) = rot_base.get(p) {
+                            let st_p = stage_of(*p);
+                            // Post-loop consumers read the last-iteration value, which lives
+                            // at stage (#stages - 1) when the loop exits (PDF §3.3.2 (c)).
+                            instr.src_regs[op_i] = (rb + ((stages - 1) - st_p)) as u8;
+                        } else if let Some(r) = producer_reg(*p) {
+                            instr.src_regs[op_i] = r;
+                        }
+                    }
+                    Some(DepKind::Local(p)) | Some(DepKind::Interloop { bb0: Some(p), .. }) => {
+                        if let Some(r) = producer_reg(*p) {
+                            instr.src_regs[op_i] = r;
+                        }
+                    }
+                    None => {
+                        instr.src_regs[op_i] = next_nonrot;
+                        next_nonrot += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
 }
