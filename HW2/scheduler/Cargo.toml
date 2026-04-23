@@ -1,0 +1,17 @@
+[package]
+name = "scheduler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+
+# Keep this crate standalone even when the repo's outer Cargo.toml declares a
+# workspace (HW1/simulator). The submission zip contains only HW2/, so this
+# package must build on its own.
+[workspace]
