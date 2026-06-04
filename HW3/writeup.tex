@@ -1,0 +1,689 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{caption}
+\usepackage{parskip}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  urlcolor=blue!50!black,
+}
+
+\definecolor{codebg}{rgb}{0.97,0.97,0.97}
+\definecolor{codekw}{rgb}{0.10,0.30,0.70}
+\definecolor{codecmt}{rgb}{0.20,0.50,0.20}
+\definecolor{codestr}{rgb}{0.70,0.20,0.20}
+\definecolor{coderule}{rgb}{0.80,0.80,0.80}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\bfseries\color{codekw},
+  commentstyle=\itshape\color{codecmt},
+  stringstyle=\color{codestr},
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{coderule},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=8pt,
+  breaklines=true,
+  showstringspaces=false,
+  captionpos=b,
+  tabsize=4,
+  language=C,
+  morekeywords={pragma,HLS,pipeline,array\_partition,dependence,unroll,rewind,cyclic,
+                inter,direction,RAW,dependent,false,true,variable,type,factor,dim,II},
+  literate={\#}{{\#}}1 {_}{{\_}}1,
+}
+
+\lstdefinestyle{schedule}{
+  basicstyle=\ttfamily\footnotesize,
+  numbers=none,
+  frame=single,
+  backgroundcolor=\color{codebg},
+  rulecolor=\color{coderule},
+  language=,
+  morekeywords={},
+  literate={},
+}
+
+\title{CS-470 Homework 3 \\ \large High-Level Synthesis}
+\author{Ricardo Perello Mas}
+\date{2026-05-20}
+
+\begin{document}
+\maketitle
+
+\section*{Conventions used in this writeup}
+
+\begin{itemize}[leftmargin=*]
+  \item An operation with latency $L$ issued at cycle $t$ produces its output \textbf{at cycle $t+L$}, where it can be consumed by a downstream operation.
+  \item Latencies (from the assignment):
+    \begin{itemize}
+      \item Integer: load/store = 1, add = 1, multiply = 4
+      \item Float:\ \ load/store = 1, add = 3, multiply = 5
+    \end{itemize}
+  \item Each array maps to one BRAM with \textbf{one memory port} unless explicitly partitioned.
+  \item Pragma syntax follows Vitis HLS 2025.2 (all optional parameters specified explicitly).
+  \item $N$ denotes \texttt{ARRAY\_SIZE}.
+  \item In Gantt charts: rows are loop iterations, columns are clock cycles. \texttt{LD}\,/\,\texttt{ST} are 1-cycle memory ops; \texttt{MUL} and \texttt{ADD} span as many columns as their latency.
+\end{itemize}
+
+\section{Static HLS (Section 2.1)}
+
+%--------------------------------------------------------------------
+\subsection{Kernel 1 --- \texttt{array[i] = array[i] * 5}}
+
+\subsubsection*{Modified code}
+
+\begin{lstlisting}
+void kernel1(int array[ARRAY_SIZE]) {
+    #pragma HLS array_partition variable=array type=cyclic factor=3 dim=1
+    for (int i = 0; i < ARRAY_SIZE; i++) {
+        #pragma HLS pipeline II=1 rewind
+        int x = array[i];
+        array[i] = (x << 2) + x;
+    }
+}
+\end{lstlisting}
+
+\subsubsection*{Per-iteration dataflow}
+
+A single iteration $i$ performs three operations:
+\begin{enumerate}[noitemsep]
+  \item \texttt{LD array[i]} --- 1 cycle
+  \item \texttt{ADD (x \textless\textless\ 2) + x} --- 1 cycle (constant shift is wiring)
+  \item \texttt{ST array[i]} --- 1 cycle
+\end{enumerate}
+
+Per-iteration latency $= 1 + 1 + 1 = 3$ cycles.
+
+\subsubsection*{Scheduling Gantt chart --- first 3 iterations (II $=1$)}
+
+\begin{lstlisting}[style=schedule]
+cycle:    0    1    2    3    4
+iter 0:  LD   ADD  ST
+iter 1:       LD   ADD  ST
+iter 2:            LD   ADD  ST
+\end{lstlisting}
+
+With II $=1$ a new iteration starts every cycle; the constant multiply is implemented as a shift plus one add.
+
+\subsubsection*{Initiation Interval}
+
+$II = 1$.
+
+The body needs \textbf{2 memory operations per iteration} (1 load + 1 store) but a single-port BRAM only services \textbf{1 access per cycle}, so $\mathrm{ResMII}_{\text{na\"ive}} = 2$. To get II $=1$ we apply cyclic partitioning with factor 3:
+
+\begin{itemize}[noitemsep]
+  \item Iteration $i$ uses bank $i \bmod 3$ for both its \texttt{LD} (at cycle $i$) and its \texttt{ST} (at cycle $i+2$).
+  \item At cycle $c$ the active accesses are: \texttt{LD} of iteration $c$ on bank $c \bmod 3$, and \texttt{ST} of iteration $c-2$ on bank $(c-2) \bmod 3$.
+  \item These banks are always different, so the port constraint is satisfied.
+  \item A cyclic factor of 2 would conflict here, because the shorter shift-add pipeline would make \texttt{LD} of iteration $c$ and \texttt{ST} of iteration $c-2$ hit the same parity bank.
+\end{itemize}
+
+No loop-carried dependence (each iteration touches a distinct address), so $\mathrm{RecMII} = 0$ and the binding II is $\mathrm{ResMII} = 1$ after partitioning.
+
+\subsubsection*{Cycle counts}
+
+\begin{itemize}[noitemsep]
+  \item One iteration: 3 cycles.
+  \item Whole task ($N$ iterations, II $=1$): $(N-1) + 3 = N+2$ cycles.
+\end{itemize}
+
+\subsubsection*{Resources used}
+
+\begin{center}
+\begin{tabular}{lcl}
+\toprule
+Resource & Count & Notes \\
+\midrule
+Multipliers              & 0 & Constant multiply is rewritten \\
+Adders                   & 1 & Computes \texttt{(x \textless\textless\ 2) + x} \\
+BRAM ports for \texttt{array} & 3 & One port per bank after partition \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection*{Optimizations and trade-offs}
+
+\begin{center}
+\begin{tabular}{p{3.2cm} p{6cm} p{5cm}}
+\toprule
+Optimization & Why & Downside \\
+\midrule
+\texttt{pipeline II=1} & Overlaps consecutive iterations. Without it each iteration serialises ($3N$ total). & Pipeline registers between stages. \\
+\addlinespace
+\texttt{(x \textless\textless\ 2) + x} & Removes the 4-cycle integer multiplier and shortens the pipeline fill/drain from 6 cycles to 3 cycles. & Uses one adder; relies on constant shifts being wiring. \\
+\addlinespace
+\texttt{array\_partition cyclic factor=3} & Gives enough memory banks for the \texttt{LD} of iteration $i$ and the \texttt{ST} of iteration $i-2$ to proceed in the same cycle. & Uses three BRAM banks instead of one. A lower-area alternative is keeping the multiplier and using factor 2, which still has II $=1$ but total latency $N+5$. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%--------------------------------------------------------------------
+\subsection{Kernel 2 --- \texttt{array[i] = array[i-1] + array[i-2] * array[i-3]}}
+
+\subsubsection*{Modified code}
+
+\begin{lstlisting}
+void kernel2(int array[ARRAY_SIZE]) {
+    // Preload the three-element sliding window from memory
+    // (cost ignored per assignment: outside the loop).
+    int v0 = array[0];  // plays the role of array[i-3]
+    int v1 = array[1];  // plays the role of array[i-2]
+    int v2 = array[2];  // plays the role of array[i-1]
+
+    for (int i = 3; i < ARRAY_SIZE; i++) {
+        #pragma HLS pipeline II=1 rewind
+        int result = v2 + v1 * v0;
+        array[i] = result;
+        // Shift the window: every register update is a free wire,
+        // no memory traffic involved.
+        v0 = v1;
+        v1 = v2;
+        v2 = result;
+    }
+}
+\end{lstlisting}
+
+\subsubsection*{Per-iteration dataflow (after the rewrite)}
+
+The na\"ive code performs 3 loads, 1 multiply, 1 add, and 1 store per iteration. With a single BRAM port the three loads alone push $\mathrm{ResMII}$ to 3, and there is a hard loop-carried dependence: iteration $i$ writes \texttt{array[i]}, which iteration $i+1$ reads as \texttt{array[(i+1)-1]}. The synthesiser conservatively waits for that store to commit, blowing II up to $\approx 9$ cycles.
+
+Key observation: \textbf{every value the loop reads, it has already read or computed in a recent iteration}. So we keep a 3-deep sliding window in registers (\texttt{v0, v1, v2}) and only ever store to memory. After the rewrite:
+
+\begin{enumerate}[noitemsep]
+  \item \texttt{MUL v1 $\cdot$ v0} --- 4 cycles
+  \item \texttt{ADD v2 + MUL} --- 1 cycle (carries \texttt{v2 = previous result})
+  \item \texttt{ST array[i]} --- 1 cycle
+  \item Shift the window: \texttt{v0 $\leftarrow$ v1; v1 $\leftarrow$ v2; v2 $\leftarrow$ result} (free).
+\end{enumerate}
+
+Per-iteration latency $= 4 + 1 + 1 = 6$ cycles.
+
+\subsubsection*{Scheduling Gantt chart --- first 3 iterations (II $=1$)}
+
+\begin{lstlisting}[style=schedule]
+cycle:    0    1    2    3    4    5    6    7    8
+iter 0:  MUL  ---- ---- ---- ADD  ST
+iter 1:       MUL  ---- ---- ---- ADD  ST
+iter 2:            MUL  ---- ---- ---- ADD  ST
+\end{lstlisting}
+
+The carried dependence is \texttt{ADD$_i \to$ ADD$_{i+1}$}: \texttt{result$_i$} feeds the next iteration's \texttt{v2}. Latency 1 cycle $\Rightarrow$ $\mathrm{RecMII} = 1$.
+
+\subsubsection*{Initiation Interval}
+
+$II = 1$.
+
+\begin{itemize}[noitemsep]
+  \item $\mathrm{ResMII}$: one ST per iteration on a single port $\Rightarrow$ 1. No more loads inside the loop.
+  \item $\mathrm{RecMII}$: \texttt{result$_i$} $\to$ \texttt{v2} $\to$ \texttt{ADD$_{i+1}$}. Path length = 1-cycle ADD $\Rightarrow$ 1.
+  \item $II = \max(1, 1) = 1$.
+\end{itemize}
+
+Note: the \texttt{MUL} of iteration $i+1$ uses the \textbf{previous} window's \texttt{v1, v2} (which become the new \texttt{v0, v1}), so the multiplier chain has \textbf{no carried dependence} --- it is fully pipelined despite its 4-cycle latency.
+
+\subsubsection*{Cycle counts}
+
+\begin{itemize}[noitemsep]
+  \item Loop runs from $i = 3$ to $i = N-1$ $\Rightarrow$ $N - 3$ iterations.
+  \item One iteration: 6 cycles.
+  \item Whole task: $(N - 3 - 1) + 6 = N + 2$ cycles.
+\end{itemize}
+
+\subsubsection*{Resources used}
+
+\begin{center}
+\begin{tabular}{lcl}
+\toprule
+Resource & Count & Notes \\
+\midrule
+Multipliers              & 1 & Pipelined, busy every cycle in steady state \\
+Adders                   & 1 & 1-cycle integer add on the recurrence \\
+BRAM ports for \texttt{array} & 1 & Only stores remain inside the loop \\
+Registers                & 3 (32-bit) & Sliding window \texttt{v0, v1, v2} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection*{Optimizations and trade-offs}
+
+\begin{center}
+\begin{tabular}{p{3.2cm} p{6cm} p{5cm}}
+\toprule
+Optimization & Why & Downside \\
+\midrule
+Sliding-window registers for \texttt{array[i-1], array[i-2], array[i-3]} & Eliminates three loads per iteration, frees the BRAM port, and breaks the synthesised RAW chain between iterations' \texttt{ST}/\texttt{LD}. & Requires preloading the first three elements (free here) and a small register file. \\
+\addlinespace
+\texttt{pipeline II=1} & Issues a new MUL each cycle so the 4-cycle multiplier is fully utilised. & Standard pipeline register cost. \\
+\addlinespace
+No \texttt{unroll} & Unroll by 2 would double multiplier and adder count with no II benefit (RecMII already 1) --- pure waste. & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A subtle pitfall: in the unmodified code the synthesiser sees \texttt{array[i-1]} and could in principle prove that the index differs from \texttt{i} and forward through registers automatically. In practice Vitis HLS does not infer the sliding window from such code --- it must be written explicitly.
+
+%--------------------------------------------------------------------
+\subsection{Kernel 3 --- Histogram: \texttt{hist[index[i]] = hist[index[i]] + weight[i]}}
+
+\subsubsection*{Modified code}
+
+\begin{lstlisting}
+void kernel3(float hist[ARRAY_SIZE],
+             float weight[ARRAY_SIZE],
+             int   index[ARRAY_SIZE]) {
+    for (int i = 0; i < ARRAY_SIZE; ++i) {
+        #pragma HLS pipeline II=5 rewind
+        hist[index[i]] = hist[index[i]] + weight[i];
+    }
+}
+\end{lstlisting}
+
+\subsubsection*{Per-iteration dataflow}
+
+Operations per iteration:
+
+\begin{enumerate}[noitemsep]
+  \item \texttt{LD index[i]}        --- 1 cycle (\texttt{index} port)
+  \item \texttt{LD weight[i]}       --- 1 cycle (\texttt{weight} port, in parallel)
+  \item \texttt{LD hist[index[i]]}  --- 1 cycle (\texttt{hist} port, must wait for the index)
+  \item \texttt{FADD hist + weight} --- 3 cycles (float add)
+  \item \texttt{ST hist[index[i]]}  --- 1 cycle (\texttt{hist} port)
+\end{enumerate}
+
+\begin{center}
+\begin{tabular}{cl}
+\toprule
+cycle & op \\
+\midrule
+0      & \texttt{LD index[i]}, \texttt{LD weight[i]} (parallel, different arrays) \\
+1      & \texttt{LD hist[index[i]]} (now we have the address) \\
+2--4   & \texttt{FADD} \\
+5      & \texttt{ST hist[index[i]]} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Per-iteration latency $= 6$ cycles.
+
+\subsubsection*{Scheduling Gantt chart --- first 3 iterations (II $=5$)}
+
+\begin{lstlisting}[style=schedule]
+cycle:    0    1    2    3    4    5    6    7    8    9   10   11   12   13   14   15
+iter 0:  LDi  LDh  FADD ---- ---- ST
+         LDw
+iter 1:                           LDi  LDh  FADD ---- ---- ST
+                                  LDw
+iter 2:                                                     LDi  LDh  FADD ---- ---- ST
+                                                            LDw
+\end{lstlisting}
+
+\noindent\texttt{LDi = LD index[i]}, \texttt{LDw = LD weight[i]}, \texttt{LDh = LD hist[index[i]]}.
+
+\subsubsection*{Initiation Interval}
+
+$II = 5$.
+
+The key issue is that the memory dependence through \texttt{hist} is not generally false. If \texttt{index[i] == index[i+1]}, iteration $i+1$ must read the value written by iteration $i$; otherwise the histogram update loses one of the weights. Since the assignment does not state that the indices are unique, we must preserve this possible RAW dependence.
+
+With the safe schedule:
+\begin{itemize}[noitemsep]
+  \item $\mathrm{ResMII}$: \texttt{hist} is hit twice per iteration (1 LD + 1 ST) on a single port $\Rightarrow$ 2.
+  \item \texttt{weight} and \texttt{index} each see one LD/iter --- no bottleneck.
+  \item $\mathrm{RecMII}$: the worst-case same-bin recurrence is \texttt{LD hist -> FADD -> ST hist -> next LD hist}. With the schedule above, the store of iteration $i$ occurs at cycle $i+5$, and the next iteration's \texttt{hist} load can occur at cycle $i+6$. Thus the next loop start is 5 cycles after the previous one.
+  \item $II = \max(2, 5) = 5$.
+\end{itemize}
+
+Could we use a \texttt{dependence false} pragma to push lower? Only under an external precondition, such as all overlapping iterations targeting distinct bins. Under that precondition the carried dependence disappears and the single \texttt{hist} port would bind the loop at II $=2$. For a general histogram, however, that pragma changes the program's meaning when indices repeat, so I do not use it in the correctness-preserving solution.
+
+\subsubsection*{Cycle counts}
+
+\begin{itemize}[noitemsep]
+  \item One iteration: 6 cycles.
+  \item Whole task ($N$ iterations, II $=5$): $(N-1)\cdot 5 + 6 = 5N + 1$ cycles.
+\end{itemize}
+
+\subsubsection*{Resources used}
+
+\begin{center}
+\begin{tabular}{lcl}
+\toprule
+Resource & Count & Notes \\
+\midrule
+Multipliers              & 0 & --- \\
+Float adders             & 1 & 3-cycle FADD, pipelined \\
+BRAM ports for \texttt{hist}   & 1 (2 ops/iter) & True dependence possible when indices repeat \\
+BRAM ports for \texttt{weight} & 1 (1 op/iter)  & --- \\
+BRAM ports for \texttt{index}  & 1 (1 op/iter)  & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection*{Optimizations and trade-offs}
+
+\begin{center}
+\begin{tabular}{p{3.2cm} p{6cm} p{5cm}}
+\toprule
+Optimization & Why & Downside \\
+\midrule
+\texttt{pipeline II=5} & Allows the independent \texttt{index} and \texttt{weight} loads of the next iteration to overlap with the previous iteration's final \texttt{hist} store, while preserving same-bin correctness. & The true histogram recurrence still dominates; speedup over the fully sequential loop is small. \\
+\addlinespace
+\textbf{Do not use} \texttt{dependence false} by default & Repeated indices are legal for a histogram, so the inter-iteration RAW through \texttt{hist} may be real. & Gives up the conditional II $=2$ schedule that would be valid only for a no-collision input contract. \\
+\addlinespace
+Cannot safely partition \texttt{hist} & Indices come from \texttt{index[i]} at runtime --- no static cyclic/block partition can rule out two overlapping iterations hitting the same bank/bin. & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%--------------------------------------------------------------------
+\subsection{Kernel 4 --- accumulator update with two indexed reads}
+
+\subsubsection*{Modified code}
+
+\begin{lstlisting}
+void kernel4(int array[ARRAY_SIZE], int index[ARRAY_SIZE], int offset) {
+    // Hoist the loop-carried accumulator out of memory.
+    int acc = array[offset];
+    // Bootstrap the sliding-window register for array[i].
+    int a_curr = array[offset + 1];
+
+    for (int i = offset + 1; i < ARRAY_SIZE - 1; ++i) {
+        #pragma HLS pipeline II=1 rewind
+        int a_next = array[i + 1];          // one LD per iteration
+        int idx    = index[i];              // one LD on the other port
+        int diff   = a_next - a_curr;       // SUB
+        int delta  = idx * diff;            // MUL -- only one per iteration
+        acc        = acc + delta;           // recurrence on acc
+        a_curr     = a_next;                // shift the register
+    }
+
+    array[offset] = acc;                    // single ST outside the loop
+}
+\end{lstlisting}
+
+\subsubsection*{Per-iteration dataflow (after the rewrite)}
+
+The original body has four loads (\texttt{array[offset]}, \texttt{index[i]}, \texttt{array[i]}, \texttt{array[i+1]}), two multiplies, two adds/subtracts, and one store back to \texttt{array[offset]} --- and every iteration round-trips the accumulator through memory. Three rewrites collapse this:
+
+\begin{enumerate}
+  \item \textbf{Hoist \texttt{array[offset]} to a scalar \texttt{acc}.} The same address is read and written every iteration $\Rightarrow$ the synthesiser would chain LD$\to$FADD$\to$ST$\to$LD across iterations ($\mathrm{RecMII} \approx 7$). Lifting the accumulator into a register breaks that chain --- only the \texttt{ADD acc + delta} cycle remains.
+  \item \textbf{Sliding register for \texttt{array[i]}.} Iteration $i+1$ reads \texttt{array[(i+1)] = array[i+1]}, which iteration $i$ already loaded. Carry it forward in \texttt{a\_curr}.
+  \item \textbf{Factor the two multiplies}: $-idx \cdot a_i + idx \cdot a_{i+1} = idx \cdot (a_{i+1} - a_i)$. One multiply, one extra subtract. We trade a 4-cycle MUL for a 1-cycle SUB.
+\end{enumerate}
+
+After all three:
+
+\begin{enumerate}[noitemsep]
+  \item \texttt{LD array[i+1]}, \texttt{LD index[i]} (parallel) --- 1 cycle
+  \item \texttt{SUB a\_next $-$ a\_curr} --- 1 cycle
+  \item \texttt{MUL idx $\cdot$ diff} --- 4 cycles
+  \item \texttt{ADD acc + delta} --- 1 cycle (the carried op)
+\end{enumerate}
+
+Per-iteration latency $= 1 + 1 + 4 + 1 = 7$ cycles.
+
+\subsubsection*{Scheduling Gantt chart --- first 3 iterations (II $=1$)}
+
+\begin{lstlisting}[style=schedule]
+cycle:    0    1    2    3    4    5    6    7    8    9
+iter 0:  LDx  SUB  MUL  ---- ---- ---- ADD
+         LDi
+iter 1:       LDx  SUB  MUL  ---- ---- ---- ADD
+              LDi
+iter 2:            LDx  SUB  MUL  ---- ---- ---- ADD
+                   LDi
+\end{lstlisting}
+
+\noindent\texttt{LDx = LD array[i+1]}, \texttt{LDi = LD index[i]}. The carried dependence is \texttt{ADD$_i$ $\to$ acc $\to$ ADD$_{i+1}$}, length = 1 cycle $\Rightarrow$ $\mathrm{RecMII} = 1$.
+
+\subsubsection*{Initiation Interval}
+
+$II = 1$.
+
+\begin{itemize}[noitemsep]
+  \item $\mathrm{ResMII}$: \texttt{array} sees 1 LD/iter, \texttt{index} sees 1 LD/iter. Separate ports $\Rightarrow$ 1.
+  \item $\mathrm{RecMII}$: ADD on the accumulator path, latency 1 $\Rightarrow$ 1.
+  \item $II = \max(1, 1) = 1$.
+\end{itemize}
+
+The 4-cycle \texttt{MUL} is \textbf{not} on the carried path --- it consumes iteration $i$'s \texttt{idx} and \texttt{diff} and feeds only that iteration's \texttt{ADD}. With a pipelined multiplier we issue one MUL per cycle and it has no bearing on II.
+
+\subsubsection*{Cycle counts}
+
+Iterations executed: $M = (\text{ARRAY\_SIZE} - 1) - (\text{offset} + 1) = N - \text{offset} - 2$.
+
+\begin{itemize}[noitemsep]
+  \item One iteration: 7 cycles.
+  \item Whole task ($M$ iterations, II $=1$): $(M-1) + 7 = M + 6 = N - \text{offset} + 4$ cycles (the final ST is outside the loop and negligible per spec).
+\end{itemize}
+
+\subsubsection*{Resources used}
+
+\begin{center}
+\begin{tabular}{lcl}
+\toprule
+Resource & Count & Notes \\
+\midrule
+Multipliers              & 1 & Factored 2 muls into 1: \texttt{idx $\cdot$ (a\_next - a\_curr)} \\
+Adders                   & 2 & 1 SUB in the body, 1 ADD on the recurrence \\
+BRAM ports for \texttt{array} & 1 & 1 LD/iter after the rolling register \\
+BRAM ports for \texttt{index} & 1 & --- \\
+Registers                & 2  & \texttt{acc}, \texttt{a\_curr} (plus pipeline registers) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection*{Optimizations and trade-offs}
+
+\begin{center}
+\begin{tabular}{p{3.4cm} p{6cm} p{4.8cm}}
+\toprule
+Optimization & Why & Downside \\
+\midrule
+Scalar accumulator (\texttt{acc}) replaces LD/ST of \texttt{array[offset]} & Removes the dominant carried chain (LD $\to$ \dots\ $\to$ ST $\to$ LD) and frees the \texttt{array} port. Without this, $\mathrm{RecMII} \geq 7$. & None functionally --- semantically equivalent because no other code writes \texttt{array[offset]} during the loop. \\
+\addlinespace
+Rolling register \texttt{a\_curr} for \texttt{array[i]} & Halves the load traffic on \texttt{array}. Without it, two LDs/iter on a single port would force $\mathrm{ResMII} = 2$. & Tiny: one extra 32-bit register and bootstrap load. \\
+\addlinespace
+Factor the two multiplies into \texttt{idx $\cdot$ (a\_next $-$ a\_curr)} & Saves a multiplier (1 mul instead of 2) and shortens the compute (4-cycle MUL $\to$ 1-cycle SUB). & None --- algebraically identical. \\
+\addlinespace
+\texttt{pipeline II=1} & Standard. & Standard. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%--------------------------------------------------------------------
+\subsection{Kernel 5 --- Data-dependent loop exit}
+
+\begin{lstlisting}
+float kernel5(float bound, float a[ARRAY_SIZE], float b[ARRAY_SIZE]) {
+    int   i   = 0;
+    float sum = 0;
+    while (sum < bound && i < ARRAY_SIZE) {
+        sum = a[i] + b[i];
+        i++;
+    }
+    return sum;
+}
+\end{lstlisting}
+
+\subsubsection*{Modified code}
+
+\begin{lstlisting}
+float kernel5(float bound, float a[ARRAY_SIZE], float b[ARRAY_SIZE]) {
+    int   i   = 0;
+    float sum = 0;
+    while (sum < bound && i < ARRAY_SIZE) {
+        #pragma HLS pipeline II=5 rewind
+        sum = a[i] + b[i];
+        i++;
+    }
+    return sum;
+}
+\end{lstlisting}
+
+\subsubsection*{Per-iteration dataflow}
+
+\begin{enumerate}[noitemsep]
+  \item \texttt{LD a[i]} and \texttt{LD b[i]} in parallel --- 1 cycle (different arrays, different ports)
+  \item \texttt{FADD a + b} --- 3 cycles
+  \item \texttt{FCMP sum \textless\ bound} --- 1 cycle (no separate latency given in spec; treated as 1-cycle compare)
+  \item \texttt{\&\&} with \texttt{i < N} and branch --- free
+\end{enumerate}
+
+Per-iteration latency $= 1 + 3 + 1 = 5$ cycles.
+
+If the course model treats the final comparison/branch as purely combinational because comparisons are not listed in the latency table, replace this with 4 cycles. I count it as 1 cycle here to be conservative and to make the control-dependence cost explicit.
+
+\subsubsection*{Scheduling Gantt chart --- first 3 iterations (static, II $=5$)}
+
+\begin{lstlisting}[style=schedule]
+cycle:    0    1    2    3    4    5    6    7    8    9   10   11   12   13   14
+iter 0:  LDa  FADD ---- ---- CMP
+         LDb
+iter 1:                      LDa  FADD ---- ---- CMP
+                             LDb
+iter 2:                                          LDa  FADD ---- ---- CMP
+                                                 LDb
+\end{lstlisting}
+
+Each iteration must finish its compare before the next iteration is allowed to begin: the synthesiser cannot start iteration $i+1$'s loads while iteration $i$'s exit condition is in flight, because it does not know whether iteration $i+1$ should execute at all.
+
+\subsubsection*{Initiation Interval}
+
+$II = 5$.
+
+\begin{itemize}[noitemsep]
+  \item $\mathrm{ResMII}$: 1 LD per port per iteration on disjoint arrays $\Rightarrow$ 1.
+  \item $\mathrm{RecMII}$: \textbf{the loop exit condition is the binding recurrence}. Path = \texttt{LD $\to$ FADD $\to$ FCMP} = $1+3+1 = 5$ cycles $\Rightarrow$ 5.
+  \item $II = \max(1, 5) = 5$.
+\end{itemize}
+
+The pipeline pragma is included for completeness --- Vitis HLS will still report II $=5$ because the recurrence dominates. Without the pragma the design would simply run sequentially (5 cycles/iter as well). There is essentially no static-HLS optimisation beyond confirming this lower bound.
+
+Note that \texttt{sum} is \textbf{overwritten} every iteration (\texttt{sum = a[i] + b[i]}, not \texttt{sum += \dots}). So the only loop-carried value is \texttt{i} (trivial) and the exit decision itself. The whole bottleneck is control, not data.
+
+\subsubsection*{Cycle counts}
+
+Let $K$ be the iteration count at which the loop exits ($K \leq N$).
+
+\begin{itemize}[noitemsep]
+  \item One iteration: 5 cycles.
+  \item Whole task ($K$ iterations, II $=5$): $\approx 5K$ cycles.
+\end{itemize}
+
+Under the zero-latency-compare convention, the corresponding static count is approximately $4K$.
+
+For comparison, a dynamically scheduled implementation could approach $K+4$ cycles (see Section~\ref{sec:dynamic}).
+
+\subsubsection*{Resources used}
+
+\begin{center}
+\begin{tabular}{lcl}
+\toprule
+Resource & Count & Notes \\
+\midrule
+Multipliers          & 0 & --- \\
+Float adders         & 1 & 3-cycle FADD, pipelined \\
+Float compare        & 1 & \texttt{\textless} against \texttt{bound} \\
+BRAM ports for \texttt{a} & 1 (1 LD/iter) & --- \\
+BRAM ports for \texttt{b} & 1 (1 LD/iter) & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection*{Why no further static-HLS optimization is possible}
+
+Every other knob (\texttt{unroll}, \texttt{array\_partition}, \texttt{dependence false}) either does not apply or does not help:
+
+\begin{itemize}
+  \item \texttt{unroll} of a \texttt{while} whose iteration count depends on runtime data is unsafe --- the synthesiser would need to assume some upper bound and add fix-up code, with no II benefit because the exit decision still serialises iteration groups.
+  \item \texttt{array\_partition} --- already maximal: \texttt{a} and \texttt{b} are on separate BRAMs, and there is only 1 access per iteration on each.
+  \item \texttt{dependence false} --- there is no memory dependence to relax; the bottleneck is \textbf{control flow}, not memory.
+\end{itemize}
+
+The fundamental obstruction is that a static schedule must, at compile time, decide whether to execute iteration $i+1$ --- and it cannot, because the answer depends on runtime data. The only way to overlap iterations is to \textbf{speculate} that the loop continues and roll back on misspeculation, which by definition is dynamic HLS.
+
+%--------------------------------------------------------------------
+\section{Dynamic HLS (Section 2.2) --- Kernel 5}\label{sec:dynamic}
+
+\subsection*{The shape of the dynamic circuit}
+
+A dynamically scheduled HLS implementation builds a dataflow circuit where each operator fires the moment its inputs are valid, communicating via the SELF (Synchronous Elastic Flow) handshake (\texttt{valid}/\texttt{ready}). The loop body becomes a small dataflow graph with a \texttt{Merge} for \texttt{i} at the loop entry, a \texttt{Branch} at the exit, and \texttt{Buff}/\texttt{FIFO} insertion to keep the recurrence cycle deadlock-free and high-throughput.
+
+For Kernel 5 the branch at the bottom is replaced by a \textbf{Speculator} (\texttt{Spec. Branch}): it predicts ``the loop continues'' and emits a new iteration's tokens \emph{before} the actual \texttt{sum \textless\ bound} comparison resolves. \texttt{Save} units sit on the boundary where regular tokens enter the speculative region (the \texttt{i++} feedback edge and the \texttt{a[i]}/\texttt{b[i]} token-issue paths) so that on a misprediction the originals can be re-emitted. \texttt{Commit} units sit on the output edges so any misspeculated tokens that leak through downstream are squashed before reaching the exit.
+
+\subsection*{Why this beats the static design}
+
+Static HLS has $II = 5$ because each iteration's start is gated on the previous iteration's compare. A speculative dataflow circuit issues new iterations every cycle --- the only floor is now the resource-MII (one load per port per iteration $\Rightarrow$ $\mathrm{ResMII} = 1$). The cycle diagrams in the course slides (the same \texttt{do \{ d = a[i]+b[i]; \dots \} while (d \textless\ x)} example) show exactly this contrast:
+
+\begin{itemize}
+  \item \textbf{Non-speculative dynamic schedule:} still $\approx 5$ cycles between iteration starts because the \texttt{Branch} waits on the compare.
+  \item \textbf{Speculative dynamic schedule (II $=1$):} iterations begin every cycle. When iteration $K$'s compare finally fires ``exit'', iterations $K+1, K+2, K+3, K+4$ are already in-flight; the speculator squashes them via the \texttt{Commit} units and the loop terminates.
+\end{itemize}
+
+Approximate cycle counts:
+
+\begin{itemize}[noitemsep]
+  \item Static HLS: $\approx 5K$ cycles.
+  \item Speculative dynamic HLS: $\approx K + 4$ cycles in the no-misprediction case. The ``$+4$'' covers the in-flight iterations that get squashed.
+\end{itemize}
+
+With a zero-latency compare convention, these become roughly $4K$ and $K+3$.
+
+For large $K$ this is close to a \textbf{5$\times$ speedup} in steady state.
+
+\subsection*{Where it really shines: a favorable data distribution}
+
+Consider an input where \texttt{sum \textless\ bound} is true for almost every iteration until the very end. Concretely, suppose:
+
+\begin{itemize}[noitemsep]
+  \item \texttt{bound = 1.0e6}
+  \item \texttt{a[i], b[i]} $\in [1.0,\ 10.0]$ for all $i < N-1$
+  \item The last entries are crafted so that \texttt{a[N-1] + b[N-1]} $>$ \texttt{bound}
+\end{itemize}
+
+Then:
+
+\begin{itemize}
+  \item The loop-continuation condition \texttt{sum \textless\ bound} is \textbf{true} for almost every iteration, so the speculator's ``continue'' prediction is correct $K-1$ times in a row and wrong only once (the final iteration).
+  \item The misprediction cost is bounded: at most 4 in-flight speculative iterations are squashed, regardless of $K$.
+  \item Total cycles $\approx K + 4$, versus $5K$ in static HLS --- a near-5$\times$ speedup that \textbf{grows with $K$}.
+\end{itemize}
+
+Note that \texttt{sum = a[i] + b[i]} (assignment, not accumulation) means each iteration's compare is \textbf{independent of the previous iterations' compares}. The speculator therefore does not have to predict a chain of branches --- it only has to bet that the loop has not yet hit its exit, which is statistically excellent when the exit is rare.
+
+\subsection*{Where dynamic HLS would not help}
+
+The picture flips if \texttt{bound} is so small that the loop exits in 1 or 2 iterations: then the speculator always mispredicts, the squash cost dominates, and the design pays for the speculation hardware (Speculator + Save + Commit units, $\sim 1.5$--$2\times$ area per the course's experimental results) with no throughput win. Average performance is bounded below by the worst-case input, so a workload mix dominated by short-running invocations should keep the static design.
+
+%--------------------------------------------------------------------
+\section*{Summary}
+
+\begin{center}
+\begin{tabular}{p{1.5cm} p{6cm} c c c}
+\toprule
+Kernel & Trick(s) & II & Latency & Total cycles \\
+\midrule
+1           & shift-add + pipeline + cyclic partition factor 3     & 1 & 3 & $N + 2$ \\
+2           & sliding-window registers + pipeline                 & 1 & 6 & $N + 2$ \\
+3           & correctness-preserving pipeline                      & 5 & 6 & $5N + 1$ \\
+4           & scalar acc.\ + rolling reg + factored mul + pipeline & 1 & 7 & $N - \text{offset} + 4$ \\
+5 (static)  & nothing to do --- exit cond.\ dominates              & 5 & 5 & $5K$ \\
+5 (dynamic) & speculate on the exit condition                     & 1 & 5 & $K + 4$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{document}

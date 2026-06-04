@@ -1,6 +1,8 @@
 # CS-470 Homework 2
 This folder contains all the necessary material to complete the homework 2 of the CS-470 course.
 
+- Student: Ricardo Perello Mas (SCIPER: 357241)
+
 - The homework handout.
 - A set of test cases to help you ensure your code is correct, under given_tests.
 - A Dockerfile containing the grading environment.
